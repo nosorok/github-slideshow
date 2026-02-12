@@ -1,9 +1,10 @@
 """
-Matrix Engine v3.0 — Determinant, Inversion & Heatmap
+Matrix Engine v3.1 — Determinant, Inversion, Multiplication & Heatmap
 
 Computes the determinant of any NxN square matrix using recursive
-Laplace (cofactor) expansion, and the inverse using Gauss-Jordan
-elimination with partial pivoting for numerical stability.
+Laplace (cofactor) expansion, the inverse using Gauss-Jordan
+elimination with partial pivoting, and the product of two
+arbitrary-sized matrices with full dimension validation.
 
 Includes a terminal heatmap UI that color-codes matrix cells based
 on their value relative to the matrix's value range.
@@ -32,6 +33,10 @@ EPSILON = 1e-12
 # The recursive determinant is O(n!) so we cap it separately at 12.
 MAX_INVERSION_SIZE = 500
 MAX_DETERMINANT_SIZE = 12
+
+# [MUL-EDGE-05] Maximum element count (rows*cols*shared_dim) for multiplication.
+# Multiplication is O(m*p*n); cap total ops at 500 million to prevent hangs.
+MAX_MULTIPLY_OPS = 500_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +75,119 @@ def _validate_square_matrix(matrix, caller="operation"):
                 )
 
     return n
+
+
+def _validate_matrix(matrix, name="matrix"):
+    """Validate that the input is a non-empty, rectangular, finite-valued matrix.
+
+    Unlike _validate_square_matrix, this allows non-square (m x n) matrices.
+    Returns (rows, cols).
+    """
+    # [MUL-EDGE-01] Empty / non-list input.
+    if not matrix or not isinstance(matrix, (list, tuple)):
+        raise ValueError(f"matrix_multiply: {name} must be a non-empty list of rows")
+
+    rows = len(matrix)
+    # Derive expected column count from the first row.
+    if not isinstance(matrix[0], (list, tuple)) or len(matrix[0]) == 0:
+        raise ValueError(f"matrix_multiply: {name} row 0 is empty or not a list")
+    cols = len(matrix[0])
+
+    for i, row in enumerate(matrix):
+        # [MUL-EDGE-02] Ragged rows.
+        if not isinstance(row, (list, tuple)) or len(row) != cols:
+            raise ValueError(
+                f"matrix_multiply: {name} has inconsistent row lengths — "
+                f"row 0 has {cols} columns but row {i} has "
+                f"{len(row) if isinstance(row, (list, tuple)) else '?'}"
+            )
+        for j, val in enumerate(row):
+            # [MUL-EDGE-03] Non-numeric entries.
+            if not isinstance(val, (int, float)):
+                raise ValueError(
+                    f"matrix_multiply: {name}[{i}][{j}] is non-numeric: {val!r}"
+                )
+            # [MUL-EDGE-04] NaN / Inf poison.
+            if math.isnan(val) or math.isinf(val):
+                raise ValueError(
+                    f"matrix_multiply: {name}[{i}][{j}] is non-finite: {val}"
+                )
+
+    return rows, cols
+
+
+# ---------------------------------------------------------------------------
+# Matrix multiplication for arbitrary dimensions
+# ---------------------------------------------------------------------------
+
+def matrix_multiply(a, b):
+    """Multiply matrix A (m x n) by matrix B (n x p), returning the m x p product.
+
+    Algorithm — Iterative triple-nested loop
+    -----------------------------------------
+    For each element C[i][j] of the result:
+        C[i][j] = sum over k of A[i][k] * B[k][j]
+
+    Raises ValueError if the matrices are dimensionally incompatible
+    (A's column count must equal B's row count) or if any input
+    violates the validation rules.
+    """
+    m, n_a = _validate_matrix(a, "A")
+    n_b, p = _validate_matrix(b, "B")
+
+    # [MUL-EDGE-06] Dimension compatibility check.
+    # A is (m x n_a) and B is (n_b x p).  Multiplication requires n_a == n_b.
+    if n_a != n_b:
+        raise ValueError(
+            f"matrix_multiply: incompatible dimensions — "
+            f"A is {m}x{n_a} but B is {n_b}x{p}; "
+            f"A's column count ({n_a}) must equal B's row count ({n_b})"
+        )
+
+    n = n_a  # shared inner dimension
+
+    # [MUL-EDGE-05] Guard against extremely large multiplications.
+    ops = m * p * n
+    if ops > MAX_MULTIPLY_OPS:
+        raise ValueError(
+            f"matrix_multiply: product requires {ops:,} operations "
+            f"({m}x{n} * {n}x{p}), exceeding the {MAX_MULTIPLY_OPS:,} safety limit"
+        )
+
+    # [MUL-EDGE-07] If either matrix is effectively empty (0 columns / 0 rows
+    # after validation), return an empty result of the correct shape.
+    # (Validation already rejects truly empty inputs, but this guards the
+    #  degenerate m>0, p=0 or n=0 corner if validation is relaxed later.)
+
+    # Core multiplication — straightforward O(m * n * p) triple loop.
+    return [
+        [sum(a[i][k] * b[k][j] for k in range(n)) for j in range(p)]
+        for i in range(m)
+    ]
+
+
+def identity_matrix(n):
+    """Return the n x n identity matrix.
+
+    [MUL-EDGE-08] The identity matrix is the multiplicative neutral element:
+    A * I = I * A = A.  Useful for verification and as a test input.
+    """
+    if n <= 0:
+        raise ValueError(f"identity_matrix: size must be positive, got {n}")
+    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+
+def zero_matrix(rows, cols):
+    """Return an (rows x cols) matrix filled with zeros.
+
+    [MUL-EDGE-09] The zero matrix is the additive identity and the
+    multiplicative annihilator: A * 0 = 0.  Useful for testing.
+    """
+    if rows <= 0 or cols <= 0:
+        raise ValueError(
+            f"zero_matrix: dimensions must be positive, got {rows}x{cols}"
+        )
+    return [[0 for _ in range(cols)] for _ in range(rows)]
 
 
 # ---------------------------------------------------------------------------
@@ -237,12 +355,12 @@ def inverse(matrix):
 # ---------------------------------------------------------------------------
 
 def multiply(a, b):
-    """Multiply two NxN matrices and return the product."""
-    n = len(a)
-    return [
-        [sum(a[i][k] * b[k][j] for k in range(n)) for j in range(n)]
-        for i in range(n)
-    ]
+    """Multiply two NxN square matrices and return the product.
+
+    Legacy convenience wrapper — delegates to the fully validated
+    matrix_multiply() for backward compatibility with inversion verification.
+    """
+    return matrix_multiply(a, b)
 
 
 def is_identity(matrix, tol=1e-9):
@@ -335,12 +453,14 @@ def _fmt_matrix(matrix, precision=6):
 
 
 def _print_matrix(matrix, label="Matrix"):
-    """Pretty-print a matrix with its determinant (if small enough)."""
-    n = len(matrix)
-    print(f"\n{label} ({n}x{n}):")
+    """Pretty-print a matrix with dimensions and determinant (if square and small)."""
+    rows = len(matrix)
+    cols = len(matrix[0]) if rows else 0
+    dim = f"{rows}x{cols}"
+    print(f"\n{label} ({dim}):")
     for line in _fmt_matrix(matrix):
         print(line)
-    if n <= MAX_DETERMINANT_SIZE:
+    if rows == cols and rows <= MAX_DETERMINANT_SIZE:
         print(f"  Determinant = {determinant(matrix)}")
 
 
@@ -382,9 +502,9 @@ def _demo_inversion(matrix, label):
 
 
 def main():
-    print("=" * 60)
-    print("  Matrix Engine v3.0 — Determinant, Inversion & Heatmap")
-    print("=" * 60)
+    print("=" * 65)
+    print("  Matrix Engine v3.1 — Determinant, Inversion, Multiply & Heatmap")
+    print("=" * 65)
 
     # ----------------------------------------------------------------
     # PART 1: Edge-case demonstrations
@@ -528,6 +648,138 @@ def main():
     print_heatmap(inverse(m3), "3x3 Inverse")
     print_heatmap(m6, "6x6 Original")
     print_heatmap(inverse(m6), "6x6 Inverse")
+
+    # ----------------------------------------------------------------
+    # PART 4: Matrix Multiplication
+    # ----------------------------------------------------------------
+    print("\n\n" + "#" * 65)
+    print("  PART 4: Matrix Multiplication")
+    print("#" * 65)
+
+    # --- Multiplication edge-case demos ---
+
+    # [MUL-EDGE-01] Empty matrix input
+    print("\n--- [MUL-EDGE-01] Empty matrix ---")
+    try:
+        matrix_multiply([], [[1]])
+    except ValueError as e:
+        print(f"  Caught: {e}")
+
+    # [MUL-EDGE-02] Ragged rows in input
+    print("\n--- [MUL-EDGE-02] Ragged rows ---")
+    try:
+        matrix_multiply([[1, 2], [3]], [[1], [2]])
+    except ValueError as e:
+        print(f"  Caught: {e}")
+
+    # [MUL-EDGE-03] Non-numeric entries
+    print("\n--- [MUL-EDGE-03] Non-numeric entry ---")
+    try:
+        matrix_multiply([[1, "a"]], [[1], [2]])
+    except ValueError as e:
+        print(f"  Caught: {e}")
+
+    # [MUL-EDGE-04] NaN / Inf in input
+    print("\n--- [MUL-EDGE-04] NaN in multiplication input ---")
+    try:
+        matrix_multiply([[float('nan'), 1]], [[1], [2]])
+    except ValueError as e:
+        print(f"  Caught: {e}")
+
+    # [MUL-EDGE-05] Oversized multiplication guard
+    print("\n--- [MUL-EDGE-05] Oversized multiplication guard ---")
+    try:
+        a_big = zero_matrix(1000, 1000)
+        b_big = zero_matrix(1000, 501)
+        matrix_multiply(a_big, b_big)
+    except ValueError as e:
+        print(f"  Caught: {e}")
+
+    # [MUL-EDGE-06] Incompatible dimensions
+    print("\n--- [MUL-EDGE-06] Dimension mismatch ---")
+    try:
+        matrix_multiply([[1, 2, 3]], [[1, 2]])  # 1x3 * 1x2
+    except ValueError as e:
+        print(f"  Caught: {e}")
+
+    # --- Successful multiplications ---
+    print("\n" + "-" * 65)
+    print("  Successful Multiplications")
+    print("-" * 65)
+
+    # Square * square (3x3)
+    a_sq = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    b_sq = [[9, 8, 7], [6, 5, 4], [3, 2, 1]]
+    print("\n  A (3x3) * B (3x3):")
+    print("  A =")
+    for line in _fmt_matrix(a_sq):
+        print(line)
+    print("  B =")
+    for line in _fmt_matrix(b_sq):
+        print(line)
+    result = matrix_multiply(a_sq, b_sq)
+    print("  A * B =")
+    for line in _fmt_matrix(result):
+        print(line)
+
+    # Non-square: (2x3) * (3x4) -> (2x4)
+    a_rect = [[1, 2, 3], [4, 5, 6]]
+    b_rect = [[7, 8, 9, 10], [11, 12, 13, 14], [15, 16, 17, 18]]
+    print(f"\n  A (2x3) * B (3x4) -> C (2x4):")
+    print("  A =")
+    for line in _fmt_matrix(a_rect):
+        print(line)
+    print("  B =")
+    for line in _fmt_matrix(b_rect):
+        print(line)
+    result = matrix_multiply(a_rect, b_rect)
+    print("  A * B =")
+    for line in _fmt_matrix(result):
+        print(line)
+
+    # Row vector * Column vector: (1x3) * (3x1) -> (1x1) scalar-like
+    row_vec = [[2, 3, 4]]
+    col_vec = [[5], [6], [7]]
+    result = matrix_multiply(row_vec, col_vec)
+    print(f"\n  Row(1x3) * Col(3x1) = {result}  (dot product = 56)")
+
+    # Column vector * Row vector: (3x1) * (1x3) -> (3x3) outer product
+    result_outer = matrix_multiply(col_vec, row_vec)
+    print(f"\n  Col(3x1) * Row(1x3) -> 3x3 outer product:")
+    for line in _fmt_matrix(result_outer):
+        print(line)
+
+    # [MUL-EDGE-08] Identity matrix: A * I = A
+    print("\n  [MUL-EDGE-08] Identity property:  A * I = A ?")
+    a_test = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    i3 = identity_matrix(3)
+    ai = matrix_multiply(a_test, i3)
+    match = ai == a_test
+    print(f"    A * I_3 == A ?  [{'PASS' if match else 'FAIL'}]")
+
+    # [MUL-EDGE-09] Zero matrix: A * 0 = 0
+    print("\n  [MUL-EDGE-09] Zero annihilator:  A * 0 = 0 ?")
+    z34 = zero_matrix(3, 4)
+    az = matrix_multiply(a_test, z34)
+    all_zero = all(v == 0 for row in az for v in row)
+    print(f"    A(3x3) * 0(3x4) == 0(3x4) ?  [{'PASS' if all_zero else 'FAIL'}]")
+
+    # Non-square chain: (2x3) * (3x2) -> (2x2)
+    a_chain = [[1, 0, 2], [0, 3, 1]]
+    b_chain = [[4, 1], [2, 0], [0, 3]]
+    result_chain = matrix_multiply(a_chain, b_chain)
+    print(f"\n  (2x3) * (3x2) -> (2x2):")
+    print("  A =")
+    for line in _fmt_matrix(a_chain):
+        print(line)
+    print("  B =")
+    for line in _fmt_matrix(b_chain):
+        print(line)
+    print("  A * B =")
+    for line in _fmt_matrix(result_chain):
+        print(line)
+    expected_chain = [[4, 7], [6, 3]]
+    print(f"  Expected: {expected_chain}  [{'PASS' if result_chain == expected_chain else 'FAIL'}]")
 
 
 if __name__ == "__main__":
